@@ -22,6 +22,7 @@ let nextId = 1;
 let pollTimer = null;
 let heartbeatTimer = null;
 let retryTimer = null;
+let pollingStarted = false;
 let cleanupStarted = false;
 const pendingChannelMessages = new Map();
 
@@ -97,26 +98,15 @@ async function changePeerGroup(group) {
   peerGroups = groups;
 }
 function buildChannelContent(m) {
-  // Claude Code's channel contract wraps notification content using the meta
-  // object. Official channel plugins (e.g. fakechat/telegram) send plain
-  // content, not a literal <channel> tag. Sending our own <channel> block can
-  // be treated as ordinary/forged text and fail to wake the live session.
   if ((m.text || '').startsWith('__COMPANY_RELAY_REPLY__')) {
-    const reply = m.text.replace(/^__COMPANY_RELAY_REPLY__\s*/, '').trim();
-    return `A relay peer replied to an A2A request previously sent from this live Claude Code session.
-
-Reply:
-${reply}
-
-This is informational. Do not call complete_task for this reply unless the user explicitly asks for more work.`;
+    return m.text.replace(/^__COMPANY_RELAY_REPLY__\s*/, '').trim();
   }
-  const origin = m.from_id === 'hermes' ? 'Hermes/Discord' : `Relay peer ${m.from_id}`;
-  return `${origin} sent an A2A relay task to this live Claude Code session.
-
-Task:
-${m.text}
-
-When finished, call the MCP tool complete_task with task_id="${m.task_id}", status="completed" or "failed", and a concise Korean user-facing summary.`;
+  // Match the working claude-peers-mcp pattern: send the sender's message as
+  // plain channel content and put routing/task metadata in meta. Claude Code
+  // renders meta as channel attributes for the model; embedding our own
+  // synthetic wrapper or long instruction block in content is unnecessary and
+  // can make debugging the channel handoff ambiguous.
+  return m.text || '';
 }
 function pushChannelMessage(m, reason='poll') {
   notify('notifications/claude/channel', { content: buildChannelContent(m), meta: { source:'rulmo-relay', task_id:m.task_id, from_id:m.from_id, sent_at:m.sent_at, role_name:m.role_name||'', skill_name:m.skill_name||'', context_hash:m.context_hash||'', peer_id:myId, cwd:CWD, retry_reason:reason } });
@@ -180,6 +170,15 @@ async function callTool(name, args={}) {
   if (name === 'complete_task') { const task_id = String(args.task_id||'').trim(); const summary = String(args.summary||'').trim(); const status = String(args.status||'completed').trim() || 'completed'; if (!task_id || !summary) throw new Error('task_id and summary are required'); await requestJson('POST', `/v0/tasks/${task_id}/complete`, {status, summary, artifacts:Array.isArray(args.artifacts)?args.artifacts:[]}); return {content:[{type:'text', text:`Task ${task_id} completed with status ${status}.`}]}; }
   throw new Error(`Unknown tool: ${name}`);
 }
+function startPollingLoops() {
+  if (pollingStarted) return;
+  pollingStarted = true;
+  pollTimer = setInterval(() => { pollAndPushMessages().catch(e => log(`poll error: ${e.message}`)); }, POLL_INTERVAL_MS);
+  retryTimer = setInterval(() => { retryPendingChannelMessages(false).catch(e => log(`retry error: ${e.message}`)); }, CHANNEL_RETRY_INTERVAL_MS);
+  heartbeatTimer = setInterval(() => { if (myId) requestJson('POST', `/v0/peers/${myId}/heartbeat`, {}).catch(e => { if (isBrokerNotFound(e)) { log(`peer ${myId} heartbeat returned 404; re-registering`); myId = null; register().catch(err => log(`re-register failed: ${err.message}`)); } }); }, HEARTBEAT_INTERVAL_MS);
+  setTimeout(() => { pollAndPushMessages().catch(e => log(`initial poll error: ${e.message}`)); }, 100);
+  log('channel polling active');
+}
 async function register() {
   if (!TOKEN) throw new Error('missing relay token');
   const gitRoot = await git(['rev-parse','--show-toplevel']);
@@ -197,8 +196,9 @@ async function cleanup(reason) {
 async function handle(msg) {
   if (!msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'initialize') {
-    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.4.3' }, instructions: 'You are connected to the Rulmo Relay. Incoming rulmo-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
+    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.4.4' }, instructions: 'You are connected to the Rulmo Relay. Incoming <channel source="rulmo-relay" task_id="..." ...> messages are A2A requests for this live Claude Code session. Treat them like a coworker tapping you on the shoulder: respond immediately, preserve session context, and when finished call the MCP tool complete_task with the task_id from the channel attributes, status="completed" or "failed", and a concise Korean user-facing summary. For channel messages with kind="peer-reply", read them as informational replies and do not call complete_task unless explicitly asked for more work.' }); return;
   }
+  if (msg.method === 'notifications/initialized') { startPollingLoops(); return; }
   if (msg.method === 'tools/list') { result(msg.id, { tools: TOOLS }); return; }
   if (msg.method === 'tools/call') { try { result(msg.id, await callTool(msg.params?.name, msg.params?.arguments || {})); } catch (e) { result(msg.id, { content:[{type:'text', text:e.message || String(e)}], isError:true }); } return; }
   if (msg.id !== undefined) result(msg.id, {});
@@ -207,8 +207,5 @@ await register();
 const rl = readline.createInterface({ input:process.stdin });
 rl.on('line', line => { try { void handle(JSON.parse(line)); } catch (e) { log(`bad json: ${e.message}`); } });
 rl.on('close', () => { void cleanup('stdin close'); });
-pollTimer = setInterval(() => { pollAndPushMessages().catch(e => log(`poll error: ${e.message}`)); }, POLL_INTERVAL_MS);
-retryTimer = setInterval(() => { retryPendingChannelMessages(false).catch(e => log(`retry error: ${e.message}`)); }, CHANNEL_RETRY_INTERVAL_MS);
-heartbeatTimer = setInterval(() => { if (myId) requestJson('POST', `/v0/peers/${myId}/heartbeat`, {}).catch(e => { if (isBrokerNotFound(e)) { log(`peer ${myId} heartbeat returned 404; re-registering`); myId = null; register().catch(err => log(`re-register failed: ${err.message}`)); } }); }, HEARTBEAT_INTERVAL_MS);
 for (const sig of ['SIGINT','SIGTERM','SIGHUP']) process.once(sig, () => { void cleanup(sig); });
-log('MCP connected; channel polling active');
+log('MCP connected; waiting for initialized notification before channel polling');
