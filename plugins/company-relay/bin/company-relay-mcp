@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+if ! command -v node >/dev/null 2>&1; then
+  echo "company-relay: Node.js is required (Claude Code already requires Node; ensure it is on PATH)." >&2
+  exit 1
+fi
+unset RELAY_WORKDIR
+exec node "$PLUGIN_ROOT/server/server.mjs"

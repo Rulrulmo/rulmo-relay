@@ -1,0 +1,9 @@
+{
+  "name": "company-relay",
+  "description": "Connect Claude Code as a live Company Relay peer via MCP. Zero-config defaults are embedded; env vars remain optional overrides.",
+  "version": "0.2.0",
+  "author": {
+    "name": "rulmo + Hermes",
+    "email": ""
+  }
+}

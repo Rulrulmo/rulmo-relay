@@ -1,0 +1,19 @@
+{
+  "name": "company-relay",
+  "owner": {
+    "name": "rulmo",
+    "email": ""
+  },
+  "plugins": [
+    {
+      "name": "company-relay",
+      "description": "Zero-config Claude Code live peer for the Company Relay broker.",
+      "author": {
+        "name": "rulmo + Hermes",
+        "email": ""
+      },
+      "source": "./plugins/company-relay",
+      "category": "development"
+    }
+  ]
+}
