@@ -16,11 +16,14 @@ let peerAlias = process.env.RELAY_PEER_ALIAS || peerSummary;
 let peerGroups = [...new Set([...(process.env.RELAY_PEER_GROUP || '').split(','), ...(process.env.RELAY_PEER_GROUPS || '').split(',')].map(s => s.trim()).filter(Boolean))];
 const POLL_INTERVAL_MS = Number(process.env.RELAY_POLL_INTERVAL_MS || process.env.RELAY_POLL_INTERVAL || '1000');
 const HEARTBEAT_INTERVAL_MS = 15000;
+const CHANNEL_RETRY_INTERVAL_MS = Number(process.env.RELAY_CHANNEL_RETRY_INTERVAL_MS || '15000');
 let myId = null;
 let nextId = 1;
 let pollTimer = null;
 let heartbeatTimer = null;
+let retryTimer = null;
 let cleanupStarted = false;
+const pendingChannelMessages = new Map();
 
 const TOOLS = [
   { name:'relay_status', description:"Show this live Claude Code session's relay peer id and broker connection status.", inputSchema:{type:'object',properties:{}} },
@@ -121,13 +124,40 @@ ${m.text}
 When finished, call the MCP tool complete_task with task_id="${m.task_id}", status="completed" or "failed", and a concise Korean user-facing summary.
 </channel>`;
 }
+function pushChannelMessage(m, reason='poll') {
+  notify('notifications/claude/channel', { content: buildChannelContent(m), meta: { source:'rulmo-relay', task_id:m.task_id, from_id:m.from_id, sent_at:m.sent_at, role_name:m.role_name||'', skill_name:m.skill_name||'', context_hash:m.context_hash||'', peer_id:myId, cwd:CWD, retry_reason:reason } });
+  log(`Pushed relay task ${m.task_id} from ${m.from_id} (${reason})`);
+}
+async function taskStillQueued(taskId) {
+  try {
+    const task = await requestJson('GET', `/v0/tasks/${encodeURIComponent(taskId)}`);
+    return task.status === 'queued';
+  } catch (e) {
+    log(`task status check failed for ${taskId}: ${e.message}`);
+    return false;
+  }
+}
 async function pollAndPushMessages() {
   if (!myId) return 0;
   const data = await requestJson('GET', `/v0/peers/${myId}/messages`);
   let pushed = 0;
   for (const m of (data.messages || [])) {
-    notify('notifications/claude/channel', { content: buildChannelContent(m), meta: { source:'rulmo-relay', task_id:m.task_id, from_id:m.from_id, sent_at:m.sent_at, role_name:m.role_name||'', skill_name:m.skill_name||'', context_hash:m.context_hash||'', peer_id:myId, cwd:CWD } });
-    pushed++; log(`Pushed relay task ${m.task_id} from ${m.from_id}`);
+    pendingChannelMessages.set(m.task_id, m);
+    pushChannelMessage(m, 'poll');
+    pushed++;
+  }
+  return pushed;
+}
+async function retryPendingChannelMessages(force=false) {
+  if (!myId || pendingChannelMessages.size === 0) return 0;
+  let pushed = 0;
+  for (const [taskId, m] of [...pendingChannelMessages.entries()]) {
+    if (!(await taskStillQueued(taskId))) {
+      pendingChannelMessages.delete(taskId);
+      continue;
+    }
+    pushChannelMessage(m, force ? 'manual-retry' : 'completion-timeout-retry');
+    pushed++;
   }
   return pushed;
 }
@@ -140,7 +170,7 @@ async function callTool(name, args={}) {
   if (name === 'list_groups') { return {content:[{type:'text', text:JSON.stringify({group_names:peerGroups}, null, 2)}]}; }
   if (name === 'list_peers') { const requestedGroup = String(args.group || '').trim(); const data = await requestJson('GET', '/v0/peers'); const peers = (data.peers||[]).filter(p => p.id !== myId).filter(p => sharesGroup(p.group_names || (p.group_name ? [p.group_name] : []), requestedGroup)).map(p => ({peer_id:p.id, address:p.peer_address||'', name:p.summary||'', group_name:p.group_name||'', group_names:p.group_names||[], cwd:p.cwd||'', branch:p.git_branch||'', status:p.status||'', age_seconds:p.age_seconds ?? null, last_seen:p.last_seen||''})); return {content:[{type:'text', text:JSON.stringify({group_names:peerGroups, peers}, null, 2)}]}; }
   if (name === 'send_to_peer_name') { if (!myId) throw new Error('relay peer is not registered yet'); const peer_name = String(args.peer_name||'').trim(); const message = String(args.message||'').trim(); const group_name = String(args.group||args.group_name||'').trim(); if (!peer_name || !message) throw new Error('peer_name and message are required'); const r = await requestJson('POST', `/v0/peers/${myId}/send`, {to_peer_name:peer_name, text:message, group_name, role_name:String(args.role_name||''), skill_name:String(args.skill_name||''), context_hash:String(args.context_hash||'')}); return {content:[{type:'text', text:`Sent to ${peer_name} (${r.to_peer_id}) as ${r.task_id}${r.group_name ? ` via group ${r.group_name}` : ''}. The reply will arrive as a rulmo-relay channel message.`}]}; }
-  if (name === 'check_messages') { const n = await pollAndPushMessages(); return {content:[{type:'text', text:n === 0 ? 'No new relay messages.' : `Pushed ${n} relay message(s) into this session.`}]}; }
+  if (name === 'check_messages') { const n = await pollAndPushMessages(); const retried = await retryPendingChannelMessages(true); return {content:[{type:'text', text:(n + retried) === 0 ? 'No new relay messages.' : `Pushed ${n} new relay message(s) and retried ${retried} pending queued message(s) into this session.`}]}; }
   if (name === 'complete_task') { const task_id = String(args.task_id||'').trim(); const summary = String(args.summary||'').trim(); const status = String(args.status||'completed').trim() || 'completed'; if (!task_id || !summary) throw new Error('task_id and summary are required'); await requestJson('POST', `/v0/tasks/${task_id}/complete`, {status, summary, artifacts:Array.isArray(args.artifacts)?args.artifacts:[]}); return {content:[{type:'text', text:`Task ${task_id} completed with status ${status}.`}]}; }
   throw new Error(`Unknown tool: ${name}`);
 }
@@ -153,7 +183,7 @@ async function register() {
 }
 async function cleanup(reason) {
   if (cleanupStarted) return; cleanupStarted = true;
-  if (pollTimer) clearInterval(pollTimer); if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (pollTimer) clearInterval(pollTimer); if (heartbeatTimer) clearInterval(heartbeatTimer); if (retryTimer) clearInterval(retryTimer);
   const id = myId; myId = null;
   if (id) { try { await requestJson('DELETE', `/v0/peers/${id}`); log(`Unregistered ${id} (${reason})`); } catch (e) { log(`unregister failed: ${e.message}`); } }
   process.exit(0);
@@ -161,7 +191,7 @@ async function cleanup(reason) {
 async function handle(msg) {
   if (!msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'initialize') {
-    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.4.0' }, instructions: 'You are connected to the Rulmo Relay. Incoming rulmo-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
+    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.4.1' }, instructions: 'You are connected to the Rulmo Relay. Incoming rulmo-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
   }
   if (msg.method === 'tools/list') { result(msg.id, { tools: TOOLS }); return; }
   if (msg.method === 'tools/call') { try { result(msg.id, await callTool(msg.params?.name, msg.params?.arguments || {})); } catch (e) { result(msg.id, { content:[{type:'text', text:e.message || String(e)}], isError:true }); } return; }
@@ -172,6 +202,7 @@ const rl = readline.createInterface({ input:process.stdin });
 rl.on('line', line => { try { void handle(JSON.parse(line)); } catch (e) { log(`bad json: ${e.message}`); } });
 rl.on('close', () => { void cleanup('stdin close'); });
 pollTimer = setInterval(() => { pollAndPushMessages().catch(e => log(`poll error: ${e.message}`)); }, POLL_INTERVAL_MS);
+retryTimer = setInterval(() => { retryPendingChannelMessages(false).catch(e => log(`retry error: ${e.message}`)); }, CHANNEL_RETRY_INTERVAL_MS);
 heartbeatTimer = setInterval(() => { if (myId) requestJson('POST', `/v0/peers/${myId}/heartbeat`, {}).catch(() => {}); }, HEARTBEAT_INTERVAL_MS);
 for (const sig of ['SIGINT','SIGTERM','SIGHUP']) process.once(sig, () => { void cleanup(sig); });
 log('MCP connected; channel polling active');
