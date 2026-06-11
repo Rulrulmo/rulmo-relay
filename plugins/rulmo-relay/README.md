@@ -28,7 +28,9 @@ chmod 600 ~/.config/rulmo-relay/token
 Then start Claude Code with the channel flag:
 
 ```bash
-claude --dangerously-load-development-channels server:rulmo-relay
+claude --channels plugin:rulmo-relay@rulmo-relay
 ```
+
+For older Claude Code builds that still use the development-channel flag, the equivalent server name is `server:rulmo-relay`.
 
 No Bun install, npm install, or relay env file is required. Optional overrides: `RULMO_RELAY_TOKEN`, `RELAY_TOKEN`, `RELAY_BASE_URL`, `RELAY_WORKSPACE`, `RELAY_PEER_NAME`, `RELAY_PEER_GROUP`.
