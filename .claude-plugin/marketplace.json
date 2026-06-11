@@ -1,5 +1,8 @@
 {
   "name": "company-relay",
+  "metadata": {
+    "description": "Zero-config Company Relay Claude Code plugins."
+  },
   "owner": {
     "name": "rulmo",
     "email": ""
