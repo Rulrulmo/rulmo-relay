@@ -197,7 +197,7 @@ async function cleanup(reason) {
 async function handle(msg) {
   if (!msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'initialize') {
-    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.4.2' }, instructions: 'You are connected to the Rulmo Relay. Incoming rulmo-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
+    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.4.3' }, instructions: 'You are connected to the Rulmo Relay. Incoming rulmo-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
   }
   if (msg.method === 'tools/list') { result(msg.id, { tools: TOOLS }); return; }
   if (msg.method === 'tools/call') { try { result(msg.id, await callTool(msg.params?.name, msg.params?.arguments || {})); } catch (e) { result(msg.id, { content:[{type:'text', text:e.message || String(e)}], isError:true }); } return; }
