@@ -1,18 +1,17 @@
 #!/usr/bin/env node
-// Zero-dependency Company Relay MCP server. Generated from company-claude-relay.
+// Zero-dependency Rulmo Relay MCP server.
 import { spawn } from 'node:child_process';
 import { hostname } from 'node:os';
 import readline from 'node:readline';
 
 const DEFAULT_BASE_URL = "https://company-relay2.rulrulmo.work";
 const DEFAULT_WORKSPACE = "company-main";
-const DEFAULT_TOKEN = "JEDyNFoMcDwQmO4jLxCo57gWMr2CUt84xjPc_aoKgrY";
 const BASE_URL = (process.env.RELAY_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, '');
 const WORKSPACE = process.env.RELAY_WORKSPACE || DEFAULT_WORKSPACE;
-const TOKEN = process.env.RELAY_TOKEN || DEFAULT_TOKEN;
+const TOKEN = process.env.RULMO_RELAY_TOKEN || process.env.RELAY_TOKEN || '';
 const CWD = process.env.RELAY_WORKDIR || process.cwd();
 const MACHINE = process.env.RELAY_MACHINE || hostname();
-let peerSummary = process.env.RELAY_PEER_NAME || process.env.RELAY_PEER_SUMMARY || 'Company Claude Code relay peer';
+let peerSummary = process.env.RELAY_PEER_NAME || process.env.RELAY_PEER_SUMMARY || 'Rulmo Relay Claude Code peer';
 let peerAlias = process.env.RELAY_PEER_ALIAS || peerSummary;
 let peerGroup = process.env.RELAY_PEER_GROUP || '';
 const POLL_INTERVAL_MS = Number(process.env.RELAY_POLL_INTERVAL_MS || process.env.RELAY_POLL_INTERVAL || '1000');
@@ -33,10 +32,10 @@ const TOOLS = [
   { name:'list_peers', description:'List active same-group relay peers.', inputSchema:{type:'object',properties:{}} },
   { name:'send_to_peer_name', description:'Send an A2A request to another live relay peer by name.', inputSchema:{type:'object',properties:{peer_name:{type:'string'},message:{type:'string'},role_name:{type:'string'},skill_name:{type:'string'},context_hash:{type:'string'}},required:['peer_name','message']} },
   { name:'check_messages', description:'Manually check and inject pending relay messages.', inputSchema:{type:'object',properties:{}} },
-  { name:'complete_task', description:'Complete a relay task after handling a company-relay channel message.', inputSchema:{type:'object',properties:{task_id:{type:'string'},summary:{type:'string'},status:{type:'string',enum:['completed','failed'],default:'completed'},artifacts:{type:'array',items:{type:'object'},default:[]}},required:['task_id','summary']} }
+  { name:'complete_task', description:'Complete a relay task after handling a rulmo-relay channel message.', inputSchema:{type:'object',properties:{task_id:{type:'string'},summary:{type:'string'},status:{type:'string',enum:['completed','failed'],default:'completed'},artifacts:{type:'array',items:{type:'object'},default:[]}},required:['task_id','summary']} }
 ];
 
-function log(msg) { console.error(`[company-relay] ${msg}`); }
+function log(msg) { console.error(`[rulmo-relay] ${msg}`); }
 function send(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
 function result(id, value) { send({ jsonrpc:'2.0', id, result:value }); }
 function error(id, code, message) { send({ jsonrpc:'2.0', id, error:{ code, message } }); }
@@ -70,7 +69,7 @@ async function updatePeerGroup(group) {
 }
 function escapeAttr(v) { return String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function attrs(m, kind) {
-  const a = [`source="company-relay"`, `task_id="${escapeAttr(m.task_id)}"`, `from_id="${escapeAttr(m.from_id)}"`, `sent_at="${escapeAttr(m.sent_at)}"`];
+  const a = [`source="rulmo-relay"`, `task_id="${escapeAttr(m.task_id)}"`, `from_id="${escapeAttr(m.from_id)}"`, `sent_at="${escapeAttr(m.sent_at)}"`];
   if (kind) a.push(`kind="${escapeAttr(kind)}"`);
   for (const k of ['role_name','skill_name','context_hash']) if (m[k]) a.push(`${k}="${escapeAttr(m[k])}"`);
   return a.join(' ');
@@ -102,7 +101,7 @@ async function pollAndPushMessages() {
   const data = await requestJson('GET', `/v0/peers/${myId}/messages`);
   let pushed = 0;
   for (const m of (data.messages || [])) {
-    notify('notifications/claude/channel', { content: buildChannelContent(m), meta: { source:'company-relay', task_id:m.task_id, from_id:m.from_id, sent_at:m.sent_at, role_name:m.role_name||'', skill_name:m.skill_name||'', context_hash:m.context_hash||'', peer_id:myId, cwd:CWD } });
+    notify('notifications/claude/channel', { content: buildChannelContent(m), meta: { source:'rulmo-relay', task_id:m.task_id, from_id:m.from_id, sent_at:m.sent_at, role_name:m.role_name||'', skill_name:m.skill_name||'', context_hash:m.context_hash||'', peer_id:myId, cwd:CWD } });
     pushed++; log(`Pushed relay task ${m.task_id} from ${m.from_id}`);
   }
   return pushed;
@@ -112,7 +111,7 @@ async function callTool(name, args={}) {
   if (name === 'set_peer_name' || name === 'set_summary') { const n = String(args.name ?? args.summary ?? '').trim(); if (!n) throw new Error('name/summary is required'); await updatePeerSummary(n); return {content:[{type:'text', text:`Relay peer name set to: ${n}`}]}; }
   if (name === 'join_group' || name === 'change_group' || name === 'set_peer_group') { const g = String(args.group ?? '').trim(); await updatePeerGroup(g); return {content:[{type:'text', text:g ? `Joined relay group: ${g}` : 'Left relay group.'}]}; }
   if (name === 'list_peers') { const data = await requestJson('GET', '/v0/peers'); const peers = (data.peers||[]).filter(p => p.id !== myId).filter(p => (p.group_name||'') === peerGroup).map(p => ({peer_id:p.id, address:p.peer_address||'', name:p.summary||'', group_name:p.group_name||'', cwd:p.cwd||'', branch:p.git_branch||'', status:p.status||'', age_seconds:p.age_seconds ?? null, last_seen:p.last_seen||''})); return {content:[{type:'text', text:JSON.stringify({peers}, null, 2)}]}; }
-  if (name === 'send_to_peer_name') { if (!myId) throw new Error('relay peer is not registered yet'); const peer_name = String(args.peer_name||'').trim(); const message = String(args.message||'').trim(); if (!peer_name || !message) throw new Error('peer_name and message are required'); const r = await requestJson('POST', `/v0/peers/${myId}/send`, {to_peer_name:peer_name, text:message, role_name:String(args.role_name||''), skill_name:String(args.skill_name||''), context_hash:String(args.context_hash||'')}); return {content:[{type:'text', text:`Sent to ${peer_name} (${r.to_peer_id}) as ${r.task_id}. The reply will arrive as a company-relay channel message.`}]}; }
+  if (name === 'send_to_peer_name') { if (!myId) throw new Error('relay peer is not registered yet'); const peer_name = String(args.peer_name||'').trim(); const message = String(args.message||'').trim(); if (!peer_name || !message) throw new Error('peer_name and message are required'); const r = await requestJson('POST', `/v0/peers/${myId}/send`, {to_peer_name:peer_name, text:message, role_name:String(args.role_name||''), skill_name:String(args.skill_name||''), context_hash:String(args.context_hash||'')}); return {content:[{type:'text', text:`Sent to ${peer_name} (${r.to_peer_id}) as ${r.task_id}. The reply will arrive as a rulmo-relay channel message.`}]}; }
   if (name === 'check_messages') { const n = await pollAndPushMessages(); return {content:[{type:'text', text:n === 0 ? 'No new relay messages.' : `Pushed ${n} relay message(s) into this session.`}]}; }
   if (name === 'complete_task') { const task_id = String(args.task_id||'').trim(); const summary = String(args.summary||'').trim(); const status = String(args.status||'completed').trim() || 'completed'; if (!task_id || !summary) throw new Error('task_id and summary are required'); await requestJson('POST', `/v0/tasks/${task_id}/complete`, {status, summary, artifacts:Array.isArray(args.artifacts)?args.artifacts:[]}); return {content:[{type:'text', text:`Task ${task_id} completed with status ${status}.`}]}; }
   throw new Error(`Unknown tool: ${name}`);
@@ -134,7 +133,7 @@ async function cleanup(reason) {
 async function handle(msg) {
   if (!msg || msg.jsonrpc !== '2.0') return;
   if (msg.method === 'initialize') {
-    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'company-relay', version:'0.2.0' }, instructions: 'You are connected to the Company Claude Relay. Incoming company-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
+    result(msg.id, { protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: { experimental: {'claude/channel':{}}, tools: {} }, serverInfo: { name:'rulmo-relay', version:'0.2.0' }, instructions: 'You are connected to the Rulmo Relay. Incoming rulmo-relay channel messages are A2A requests. Preserve session context and always call complete_task with the task_id when finished.' }); return;
   }
   if (msg.method === 'tools/list') { result(msg.id, { tools: TOOLS }); return; }
   if (msg.method === 'tools/call') { try { result(msg.id, await callTool(msg.params?.name, msg.params?.arguments || {})); } catch (e) { result(msg.id, { content:[{type:'text', text:e.message || String(e)}], isError:true }); } return; }

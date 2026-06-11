@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rulmo-relay"
+CONFIG_FILE="${RULMO_RELAY_CONFIG:-$CONFIG_DIR/config.json}"
+TOKEN_FILE="${RULMO_RELAY_TOKEN_FILE:-$CONFIG_DIR/token}"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "rulmo-relay: Node.js is required (Claude Code already requires Node; ensure it is on PATH)." >&2
+  exit 1
+fi
+
+# Token priority: explicit env > JSON config > token file > one-time TTY prompt.
+if [[ -z "${RULMO_RELAY_TOKEN:-${RELAY_TOKEN:-}}" ]]; then
+  if [[ -f "$CONFIG_FILE" ]]; then
+    token_from_json="$(node -e 'try { const p=process.argv[1]; const fs=require("fs"); const j=JSON.parse(fs.readFileSync(p,"utf8")); process.stdout.write(j.token || ""); } catch {}' "$CONFIG_FILE")"
+    if [[ -n "$token_from_json" ]]; then
+      export RULMO_RELAY_TOKEN="$token_from_json"
+    fi
+  elif [[ -f "$TOKEN_FILE" ]]; then
+    export RULMO_RELAY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+  fi
+fi
+
+if [[ -z "${RULMO_RELAY_TOKEN:-${RELAY_TOKEN:-}}" ]]; then
+  tty_path="$(tty 2>/dev/null || true)"
+  if [[ -n "$tty_path" && "$tty_path" != "not a tty" && -r "$tty_path" && -w "$tty_path" ]]; then
+    mkdir -p "$CONFIG_DIR"
+    printf 'Rulmo Relay token: ' > "$tty_path"
+    stty -echo < "$tty_path" || true
+    IFS= read -r token < "$tty_path"
+    stty echo < "$tty_path" || true
+    printf '\n' > "$tty_path"
+    if [[ -z "$token" ]]; then
+      echo "rulmo-relay: empty token; aborting" >&2
+      exit 1
+    fi
+    node -e 'const fs=require("fs"); const p=process.argv[1]; const token=process.argv[2]; fs.writeFileSync(p, JSON.stringify({token}, null, 2)+"\n", {mode:0o600}); try { fs.chmodSync(p,0o600); } catch {}' "$CONFIG_FILE" "$token"
+    export RULMO_RELAY_TOKEN="$token"
+    echo "rulmo-relay: token saved to $CONFIG_FILE" >&2
+  else
+    echo "rulmo-relay: missing token. Set it once with:" >&2
+    echo "  mkdir -p ~/.config/rulmo-relay && printf '%s' 'YOUR_TOKEN' > ~/.config/rulmo-relay/token && chmod 600 ~/.config/rulmo-relay/token" >&2
+    echo "or launch Claude with RULMO_RELAY_TOKEN=YOUR_TOKEN." >&2
+    exit 1
+  fi
+fi
+
+unset RELAY_WORKDIR
+exec node "$PLUGIN_ROOT/server/server.mjs"

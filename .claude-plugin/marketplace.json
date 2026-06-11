@@ -1,7 +1,7 @@
 {
-  "name": "company-relay",
+  "name": "rulmo-relay",
   "metadata": {
-    "description": "Zero-config Company Relay Claude Code plugins."
+    "description": "Rulmo Relay Claude Code plugins."
   },
   "owner": {
     "name": "rulmo",
@@ -9,13 +9,13 @@
   },
   "plugins": [
     {
-      "name": "company-relay",
-      "description": "Zero-config Claude Code live peer for the Company Relay broker.",
+      "name": "rulmo-relay",
+      "description": "Claude Code live peer for the Rulmo Relay broker. Requires only a relay token on the remote machine.",
       "author": {
         "name": "rulmo + Hermes",
         "email": ""
       },
-      "source": "./plugins/company-relay",
+      "source": "./plugins/rulmo-relay",
       "category": "development"
     }
   ]

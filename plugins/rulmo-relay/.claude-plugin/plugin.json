@@ -1,0 +1,9 @@
+{
+  "name": "rulmo-relay",
+  "description": "Connect Claude Code as a live Rulmo Relay peer via MCP. Broker URL/workspace are built in; token is entered on the remote machine once or supplied by env.",
+  "version": "0.3.0",
+  "author": {
+    "name": "rulmo + Hermes",
+    "email": ""
+  }
+}

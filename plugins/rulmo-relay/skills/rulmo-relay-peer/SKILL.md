@@ -1,11 +1,11 @@
 ---
-name: company-relay-peer
-description: Use when operating as a Company Relay peer, checking relay status, naming this peer, listing peers, sending peer-to-peer messages, or completing relay tasks.
+name: rulmo-relay-peer
+description: Use when operating as a Rulmo Relay peer, checking relay status, naming this peer, listing peers, sending peer-to-peer messages, or completing relay tasks.
 ---
 
-# Company Relay Peer
+# Rulmo Relay Peer
 
-You are connected to the Company Relay broker through the `company-relay` MCP server.
+You are connected to the Rulmo Relay broker through the `rulmo-relay` MCP server.
 
 Useful MCP tools:
 
