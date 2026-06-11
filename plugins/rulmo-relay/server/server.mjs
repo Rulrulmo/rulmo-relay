@@ -45,6 +45,7 @@ function send(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
 function result(id, value) { send({ jsonrpc:'2.0', id, result:value }); }
 function error(id, code, message) { send({ jsonrpc:'2.0', id, error:{ code, message } }); }
 function notify(method, params) { send({ jsonrpc:'2.0', method, params }); }
+function isBrokerNotFound(error) { return error instanceof Error && /returned 404:/.test(error.message); }
 
 async function requestJson(method, path, body) {
   if (!TOKEN) throw new Error('missing relay token');
@@ -95,34 +96,27 @@ async function changePeerGroup(group) {
   await requestJson('PATCH', `/v0/peers/${myId}`, { group_names: groups });
   peerGroups = groups;
 }
-function escapeAttr(v) { return String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function attrs(m, kind) {
-  const a = [`source="rulmo-relay"`, `task_id="${escapeAttr(m.task_id)}"`, `from_id="${escapeAttr(m.from_id)}"`, `sent_at="${escapeAttr(m.sent_at)}"`];
-  if (kind) a.push(`kind="${escapeAttr(kind)}"`);
-  for (const k of ['role_name','skill_name','context_hash']) if (m[k]) a.push(`${k}="${escapeAttr(m[k])}"`);
-  return a.join(' ');
-}
 function buildChannelContent(m) {
+  // Claude Code's channel contract wraps notification content using the meta
+  // object. Official channel plugins (e.g. fakechat/telegram) send plain
+  // content, not a literal <channel> tag. Sending our own <channel> block can
+  // be treated as ordinary/forged text and fail to wake the live session.
   if ((m.text || '').startsWith('__COMPANY_RELAY_REPLY__')) {
     const reply = m.text.replace(/^__COMPANY_RELAY_REPLY__\s*/, '').trim();
-    return `<channel ${attrs(m,'peer-reply')}>
-A relay peer replied to an A2A request previously sent from this live Claude Code session.
+    return `A relay peer replied to an A2A request previously sent from this live Claude Code session.
 
 Reply:
 ${reply}
 
-This is informational. Do not call complete_task for this reply unless the user explicitly asks for more work.
-</channel>`;
+This is informational. Do not call complete_task for this reply unless the user explicitly asks for more work.`;
   }
   const origin = m.from_id === 'hermes' ? 'Hermes/Discord' : `Relay peer ${m.from_id}`;
-  return `<channel ${attrs(m)}>
-${origin} sent an A2A relay task to this live Claude Code session.
+  return `${origin} sent an A2A relay task to this live Claude Code session.
 
 Task:
 ${m.text}
 
-When finished, call the MCP tool complete_task with task_id="${m.task_id}", status="completed" or "failed", and a concise Korean user-facing summary.
-</channel>`;
+When finished, call the MCP tool complete_task with task_id="${m.task_id}", status="completed" or "failed", and a concise Korean user-facing summary.`;
 }
 function pushChannelMessage(m, reason='poll') {
   notify('notifications/claude/channel', { content: buildChannelContent(m), meta: { source:'rulmo-relay', task_id:m.task_id, from_id:m.from_id, sent_at:m.sent_at, role_name:m.role_name||'', skill_name:m.skill_name||'', context_hash:m.context_hash||'', peer_id:myId, cwd:CWD, retry_reason:reason } });
@@ -139,7 +133,19 @@ async function taskStillQueued(taskId) {
 }
 async function pollAndPushMessages() {
   if (!myId) return 0;
-  const data = await requestJson('GET', `/v0/peers/${myId}/messages`);
+  let data;
+  try {
+    data = await requestJson('GET', `/v0/peers/${myId}/messages`);
+  } catch (e) {
+    if (isBrokerNotFound(e)) {
+      log(`peer ${myId} no longer exists on broker; re-registering before polling`);
+      myId = null;
+      await register();
+      data = await requestJson('GET', `/v0/peers/${myId}/messages`);
+    } else {
+      throw e;
+    }
+  }
   let pushed = 0;
   for (const m of (data.messages || [])) {
     pendingChannelMessages.set(m.task_id, m);
@@ -203,6 +209,6 @@ rl.on('line', line => { try { void handle(JSON.parse(line)); } catch (e) { log(`
 rl.on('close', () => { void cleanup('stdin close'); });
 pollTimer = setInterval(() => { pollAndPushMessages().catch(e => log(`poll error: ${e.message}`)); }, POLL_INTERVAL_MS);
 retryTimer = setInterval(() => { retryPendingChannelMessages(false).catch(e => log(`retry error: ${e.message}`)); }, CHANNEL_RETRY_INTERVAL_MS);
-heartbeatTimer = setInterval(() => { if (myId) requestJson('POST', `/v0/peers/${myId}/heartbeat`, {}).catch(() => {}); }, HEARTBEAT_INTERVAL_MS);
+heartbeatTimer = setInterval(() => { if (myId) requestJson('POST', `/v0/peers/${myId}/heartbeat`, {}).catch(e => { if (isBrokerNotFound(e)) { log(`peer ${myId} heartbeat returned 404; re-registering`); myId = null; register().catch(err => log(`re-register failed: ${err.message}`)); } }); }, HEARTBEAT_INTERVAL_MS);
 for (const sig of ['SIGINT','SIGTERM','SIGHUP']) process.once(sig, () => { void cleanup(sig); });
 log('MCP connected; channel polling active');
