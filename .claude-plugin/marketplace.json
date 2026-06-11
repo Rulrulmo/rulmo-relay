@@ -1,6 +1,5 @@
 {
   "name": "company-relay",
-  "description": "Zero-config Company Relay Claude Code plugins.",
   "owner": {
     "name": "rulmo",
     "email": ""
