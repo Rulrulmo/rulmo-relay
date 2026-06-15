@@ -1,6 +1,8 @@
 {
-  "rulmo-relay": {
-    "type": "stdio",
-    "command": "${CLAUDE_PLUGIN_ROOT}/bin/rulmo-relay-mcp"
+  "mcpServers": {
+    "rulmo-relay": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/rulmo-relay-mcp"
+    }
   }
 }
